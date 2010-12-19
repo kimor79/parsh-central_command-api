@@ -1,0 +1,292 @@
+<?php
+
+/**
+
+Copyright (c) 2010, Kimo Rosenbaum and contributors
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the owner nor the names of its contributors
+      may be used to endorse or promote products derived from this
+      software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+**/
+
+class Parsh {
+
+	private $token_chars = 'abcdefghijklmnopqrstuvwxyz0123456789 .-_';
+
+	public function validateJobID($job_id = 0) {
+	// Purpose: verify job id
+	// Inputs: job id
+	// Returns: true/false
+
+		if(!empty($job_id) && ctype_digit((string)$job_id)) {
+			return true;
+		}
+
+		return false;
+	}
+
+	public function validateNode($input = NULL) {
+	// Purpose: Check if input is a valid nodename
+	// Inputs: string
+	// Returns: true/false
+
+		if(empty($input)) {
+			return false;
+		}
+
+		// Allow IPs
+		if(filter_var($input, FILTER_VALIDATE_IP)) {
+			return true;
+		}
+
+		if(preg_match('/^[a-z0-9.-]+$/', strtolower($input))) {
+			return true;
+		}
+
+		return false;
+	}
+
+	public function validateToken($token = NULL, $job_id = 0) {
+	// Purpose: Validate token against db
+	// Inputs: token, optional job id
+	// Returns: true/false
+
+		$query = sprintf("SELECT * FROM `job_tokens` WHERE `token`='%s'",
+			mysql_real_escape_string($token));
+
+		if($this->validateJobID($job_id)) {
+			$query .= sprintf(" AND `job_id`='%d'", $job_id);
+		}
+
+		$result = do_mysql_query($query);
+
+		if($result[0] === true) {
+			if(mysql_num_rows($result[1]) > 0) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	public function generateToken($job_id = 0) {
+	// Purpose: Generate a random unique token and save in db
+	// Inputs: none
+	// Returns: token or NULL
+
+		if(!$this->validateJobID($job_id)) {
+			return NULL;
+		}
+
+		$t_array = array();
+
+		for($i = 0; $i < 254; $i++) {
+			$t_array[] = $this->token_chars[ rand(0, strlen($this->token_chars) -1) ];
+		}
+
+		shuffle($t_array);
+		$token = implode('', $t_array);
+
+		if($this->validateToken($token)) {
+			// Token already exists, try another one
+			return $this->generateToken($job_id);
+		}
+
+		$query = sprintf("INSERT INTO `job_tokens` SET `job_id`='%d', `token`='%s'",
+			$job_id, mysql_real_escape_string($token));
+		$result = do_mysql_query($query);
+
+		if($result[0] === false) {
+			return NULL;
+		}
+
+		return $token;
+	}
+
+	public function deleteToken($token = NULL, $job_id = 0) {
+	// Purpose: Generate a random unique token and save in db
+	// Inputs: token, job id
+	// Returns: array (from do_mysql_query)
+
+		if(!$this->validateJobID($job_id)) {
+			return false;
+		}
+
+		if($this->validateToken($token, $job_id)) {
+			$query = sprintf("DELETE FROM `job_tokens` WHERE `job_id`='%d' AND `token`='%s'",
+				$job_id, mysql_real_escape_string($token));
+			return do_mysql_query($query);
+		}
+
+		return false;
+	}
+
+	/**
+	 * Return details for a job
+	 * @param array $params Associative array of fields/values to search for
+	 * @return array Jobs
+	 */
+	public function getJobDetailsByJob($search = array()) {
+		$details = array();
+		$query_opts = array();
+		$query_str = '';
+
+		if(!empty($search)) {
+			$available_fields = get_column_names('jobs');
+
+			foreach($search as $field => $value) {
+				if(array_key_exists($field, $available_fields)) {
+					$query_opts[] = sprintf("`jobs`.`%s` LIKE '%s'", $field,
+						mysql_real_escape_string($value));
+				}
+
+				if($field === 'user') {
+					$query_opts[] = sprintf("(`jobs`.`real_user` LIKE '%s' OR `jobs`.`run_as_user` LIKE '%s')",
+						mysql_real_escape_string($value), mysql_real_escape_string($value));
+				}
+			}
+		}
+
+		if(!empty($query_opts)) {
+			$query_str = ' WHERE ' . implode(' AND ', $query_opts);
+		}
+
+		$query = 'SELECT `jobs`.*, COUNT(`node`) AS `total_nodes` FROM `jobs`
+			LEFT JOIN `nodes` USING (`job_id`)';
+		$query .= $query_str;
+		$query .= ' GROUP BY `job_id`';
+		$result = do_mysql_query($query);
+
+		if($result[0] === true) {
+			while($line = mysql_fetch_assoc($result[1])) {
+				ksort($line);
+				$details[(string)$line['job_id']] = $line;
+			}
+		}
+
+		return $details;
+	}
+
+	/**
+	 * Return details for a node
+	 * @param array $params Associative array of fields/values to search for
+	 * @return array Array of nodes
+	 */
+	public function getNodeDetailsByJob($search = array()) {
+		$details = array();
+		$query_opts = array();
+		$query_str = '';
+
+		if(!empty($search)) {
+			$available_fields = array_merge(
+				get_column_names('jobs'),
+				get_column_names('nodes')
+			);
+
+			foreach($search as $field => $value) {
+				if(array_key_exists($field, $available_fields)) {
+					switch($field) {
+						case 'start_time':
+						case 'finish_time':
+							$field = 'nodes`.`' . $field;
+							break;
+					}
+
+					$query_opts[] = sprintf("`%s` LIKE '%s'", $field,
+						mysql_real_escape_string($value));
+				}
+			}
+		}
+
+		if(!empty($query_opts)) {
+			$query_str = ' WHERE ' . implode(' AND ', $query_opts);
+		}
+
+		$query = 'SELECT `jobs`.*, `nodes`.* FROM `nodes`
+			LEFT JOIN `jobs` USING (`job_id`)';
+		$query .= $query_str;
+		$result = do_mysql_query($query);
+
+		if($result[0] === true) {
+			while($line = mysql_fetch_assoc($result[1])) {
+				ksort($line);
+				$details[] = $line;
+			}
+		}
+
+		return $details;
+	}
+
+	/**
+	 * Return details for a node
+	 * @param array $params Associative array of fields/values to search for
+	 * @return array Node
+	 */
+	public function getNodeDetailsByNode($search = array()) {
+		$details = array();
+		$query_opts = array();
+		$query_str = '';
+
+		if(!empty($search)) {
+			$available_fields = array_merge(
+				get_column_names('nodes'),
+				get_column_names('jobs')
+			);
+
+			foreach($search as $field => $value) {
+				if(array_key_exists($field, $available_fields)) {
+					switch($field) {
+						case 'start_time':
+						case 'finish_time':
+							$field = 'nodes`.`' . $field;
+							break;
+					}
+
+					$query_opts[] = sprintf("`%s` LIKE '%s'", $field,
+						mysql_real_escape_string($value));
+				}
+			}
+		}
+
+		if(!empty($query_opts)) {
+			$query_str = ' WHERE ' . implode(' AND ', $query_opts);
+		}
+
+		$query = 'SELECT `nodes`.`node`, COUNT(`job_id`) AS `total_jobs` FROM `nodes`
+			LEFT JOIN `jobs` USING (`job_id`)';
+		$query .= $query_str;
+		$query .= ' GROUP BY `node`';
+		$result = do_mysql_query($query);
+
+		if($result[0] === true) {
+			while($line = mysql_fetch_assoc($result[1])) {
+				ksort($line);
+				$details[] = $line;
+			}
+		}
+
+		return $details;
+	}
+}
+
+?>
