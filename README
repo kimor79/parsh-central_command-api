@@ -1,0 +1,3 @@
+Parsh - Parallel SSH
+
+Code for the central command API, where job and node information is stored.
